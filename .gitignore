@@ -22,6 +22,9 @@ dist-ssr
 *.sln
 *.sw?
 
+# Base44 preview metadata (machine-specific, stays local)
+.base44/
+
 # wrangler files
 .wrangler
 .dev.vars*
