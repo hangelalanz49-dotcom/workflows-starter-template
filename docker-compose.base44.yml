@@ -1,0 +1,80 @@
+# Base44 sandbox dev environment for the Cloudflare Workflows Starter Template.
+#
+# How this app runs: it is a single Cloudflare Worker that serves both the React
+# client and the backend (REST API under /api/* plus the /ws WebSocket endpoint).
+# The Worker body is emulated locally by wrangler/workerd through
+# @cloudflare/vite-plugin, so `vite` alone provides frontend + Workflow + Durable
+# Object on ONE origin (default port 5173). No Cloudflare account, API token or
+# any other external credential is required for local development.
+#
+# Because everything is one origin, host port 3000 simply maps to Vite's 5173:
+# the client's relative fetches ("/api/workflow/start") and its WebSocket
+# ("/ws?instanceId=...") both stay same-origin, exactly as in `npm run dev`.
+
+services:
+  app:
+    # Plain runtime image + bind-mounted source: edits hot-reload, nothing is
+    # baked into the image.
+    image: node:22
+    working_dir: /app
+    restart: on-failure
+    command:
+      - sh
+      - -ec
+      - |
+        npm ci --no-audit --no-fund
+        exec npx vite --host 0.0.0.0 --port 5173 --strictPort
+    ports:
+      # The user-facing web entry point must be on host port 3000.
+      - "3000:5173"
+    volumes:
+      # Live source from the sandbox.
+      - .:/app
+      # Keep installed deps and the npm cache out of the bind mount so the
+      # startup `npm ci` stays fast on later boots.
+      - node_modules:/app/node_modules
+      - npm_cache:/root/.npm
+    environment:
+      # Both are provided by the Base44 platform and resolve to empty strings
+      # outside the preview sandbox.
+      # - Vite >= 6.1 appends __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS to
+      #   server.allowedHosts, which is what lets the preview proxy's Host header
+      #   (<port>-<sandbox id>.$BASE44_SANDBOX_HOST_DOMAIN) through the dev
+      #   server's host check.
+      # - BASE44_PREVIEW_MODE is passed through for parity with other Base44
+      #   setups; this app needs no conditional sandbox override.
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+      - BASE44_PREVIEW_MODE
+    healthcheck:
+      # Probes both halves of the container and names the one that failed:
+      #   frontend -> Vite serves index.html with the React root
+      #   worker   -> /ws without an instanceId is answered by the Worker itself
+      #               (plain 400 "instanceId query parameter required"), proving
+      #               the workerd runtime and the API router are up.
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "(async () => {
+            const failures = [];
+            try {
+              const res = await fetch('http://127.0.0.1:5173/');
+              const body = await res.text();
+              if (!res.ok || !body.includes('id=\"root\"')) failures.push('frontend: HTTP ' + res.status);
+            } catch (e) { failures.push('frontend: ' + e.message); }
+            try {
+              const res = await fetch('http://127.0.0.1:5173/ws');
+              const body = await res.text();
+              if (res.status !== 400 || !body.includes('instanceId query parameter required')) failures.push('worker: unexpected response ' + res.status);
+            } catch (e) { failures.push('worker: ' + e.message); }
+            if (failures.length) { console.error(failures.join('; ')); process.exit(1); }
+            console.log('frontend and worker ok');
+          })();"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # `npm ci` plus the first Vite/Worker compile takes a while on a cold boot.
+      start_period: 240s
+
+volumes:
+  node_modules:
+  npm_cache:
